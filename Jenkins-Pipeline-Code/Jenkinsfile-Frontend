@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+    
+    tools{
+        jdk 'jdk17'
+        nodejs 'nodejs16'  
+    }
+
+    environment {
+        SCANNER_HOME=tool 'sonar-scanner'
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Velocity9919/wanderlust.git'
+            }
+        }
+        
+        stage('frontend application') {
+            steps {
+                dir('frontend') {
+                    sh "npm install"
+                }
+            }
+        }
+
+        stage('Trivy File Scan') {
+            steps {
+                dir('frontend') {
+                    sh 'trivy fs . > trivyfs.txt'
+                }
+            }
+        }
+
+        stage('Sonarqube Analysis') {
+            steps {
+                dir('frontend') {
+                    withSonarQubeEnv('sonar-server') {
+                        sh ''' $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=wanderlust-frontend \
+                        -Dsonar.projectKey=wanderlust-frontend '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Check') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token' 
+                }
+            }
+        }
+
+        stage('OWASP Dependency-Check Scan') {
+            steps {
+                dir('frontend') {
+                    dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                }
+            }
+        }
+
+        stage("Docker frontend Build & push") {
+            steps {
+                script {
+                    dir('frontend') {
+                        withDockerRegistry(credentialsId: 'dockerhub', toolName: 'docker'){
+                        
+                            sh 'docker system prune -f'
+                            sh 'docker container prune -f'
+                            sh 'docker build -t wanderlust-frontend .'
+                            sh "docker tag wanderlust-frontend nareshbabu1991/wanderlust-frontend:latest "
+                            sh "docker push nareshbabu1991/wanderlust-frontend:latest "
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to container'){
+            steps{
+                sh 'docker run -d --name three-tier-frontend -p 5000:5000 nareshbabu1991/wanderlust-frontend:latest'
+            }
+        }
+        
+        stage('trivy'){
+            steps{
+                script{
+                    sh 'trivy image --severity HIGH,CRITICAL nareshbabu1991/wanderlust-frontend:latest'
+                }
+            }
+        }
+
+        stage("Code Deploy: Docker-compose"){
+            steps{
+                sh "docker-compose down && docker-compose up -d"
+            }
+        }
+    }
+}
